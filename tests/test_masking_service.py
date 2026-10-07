@@ -35,3 +35,27 @@ def test_masks_mobile_number_without_area_code() -> None:
     masked = mask_personal_data("Retorno pelo número 99123-4567.")
 
     assert masked == "Retorno pelo número [TELEFONE]."
+
+
+def test_masks_email_followed_by_sentence_punctuation() -> None:
+    masked = mask_personal_data("Contato maria.souza@exemplo.com.")
+
+    assert masked == "Contato [E-MAIL]."
+
+
+def test_preserves_operational_identifiers_and_masks_document_like_protocol() -> None:
+    text = (
+        "Contrato 4821937, protocolo 20261006001, ONU serial ALCLF1234567, "
+        "porta 4, RSSI -79 dBm, potência óptica -27.5 dBm e teste de 280 Mbps."
+    )
+
+    masked = mask_personal_data(text)
+
+    assert "Contrato 4821937" in masked
+    assert "20261006001" not in masked
+    assert "protocolo [CPF]" in masked
+    assert "ONU serial ALCLF1234567" in masked
+    assert "porta 4" in masked
+    assert "-79 dBm" in masked
+    assert "-27.5 dBm" in masked
+    assert "280 Mbps" in masked

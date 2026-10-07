@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 from app.services.llm_service import LLMService, TokenUsage
@@ -27,6 +28,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--category", help="Categoria opcional escolhida pelo analista."
     )
+    parser.add_argument(
+        "--show-masked",
+        action="store_true",
+        help="Exibe o relato mascarado e encerra sem chamar a API.",
+    )
     return parser
 
 
@@ -45,11 +51,15 @@ def _format_usage(usage: TokenUsage | None) -> str:
     )
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    arguments = _build_parser().parse_args()
+    arguments = _build_parser().parse_args(argv)
     original_text = _read_text(arguments)
     masked_text = mask_personal_data(original_text)
+    if arguments.show_masked:
+        logging.info("%s", masked_text)
+        return
+
     service = LLMService()
 
     started_at = time.perf_counter()
