@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
 
@@ -53,7 +54,7 @@ class FakeCompletions:
         self.calls: list[dict[str, Any]] = []
 
     def create(self, **kwargs: Any) -> Any:
-        self.calls.append(kwargs)
+        self.calls.append(deepcopy(kwargs))
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -133,7 +134,9 @@ def test_invalid_json_is_corrected_on_single_retry() -> None:
     assert result.usage is not None
     assert result.usage.total_tokens == 65
     correction_messages = client.completions.calls[1]["messages"]
+    assert len(correction_messages) == 4
     assert "não atende ao contrato JSON" in correction_messages[-1]["content"]
+    assert client.completions.calls[1]["max_tokens"] == settings().llm_max_tokens
 
 
 def test_invalid_json_twice_raises_controlled_error() -> None:
@@ -219,10 +222,54 @@ def test_optional_reasoning_parameter_is_only_sent_when_configured() -> None:
     }
 
 
-def test_truncated_response_is_reported_when_json_is_still_valid() -> None:
-    response = fake_response(json.dumps(valid_payload()), finish_reason="length")
-    service = LLMService(settings=settings(), client=FakeClient([response]))
+def test_truncated_response_repeats_original_prompt_with_double_tokens() -> None:
+    first = fake_response(
+        '{"categoria": "Quedas"',
+        finish_reason="length",
+        prompt_tokens=10,
+        completion_tokens=15,
+    )
+    second = fake_response(
+        json.dumps(valid_payload()),
+        prompt_tokens=20,
+        completion_tokens=25,
+    )
+    client = FakeClient([first, second])
+    service = LLMService(
+        settings=settings(llm_max_tokens=1500),
+        client=client,
+    )
 
     result = service.analyze("Relato mascarado.")
 
     assert result.truncated is True
+    assert result.validated_on_first_response is False
+    assert result.attempts == 2
+    assert result.usage is not None
+    assert result.usage.total_tokens == 70
+    assert client.completions.calls[0]["max_tokens"] == 1500
+    assert client.completions.calls[1]["max_tokens"] == 3000
+    assert (
+        client.completions.calls[1]["messages"]
+        == client.completions.calls[0]["messages"]
+    )
+    assert len(client.completions.calls[1]["messages"]) == 2
+
+
+def test_truncated_response_twice_raises_controlled_error() -> None:
+    client = FakeClient(
+        [
+            fake_response("conteúdo parcial", finish_reason="length"),
+            fake_response("ainda parcial", finish_reason="length"),
+        ]
+    )
+    service = LLMService(
+        settings=settings(llm_max_tokens=1500),
+        client=client,
+    )
+
+    with pytest.raises(LLMResponseError, match="truncada"):
+        service.analyze("Relato mascarado.")
+
+    assert len(client.completions.calls) == 2
+    assert client.completions.calls[1]["max_tokens"] == 3000

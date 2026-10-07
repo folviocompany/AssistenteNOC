@@ -11,6 +11,10 @@ def test_system_prompt_contains_required_contract_rules() -> None:
     assert "não informado" in SYSTEM_PROMPT
     assert "Não invente medições" in SYSTEM_PROMPT
     assert '"prioridade": "Baixa | Média | Alta | Crítica"' in SYSTEM_PROMPT
+    assert "devem ter de 3 a 5 itens" in SYSTEM_PROMPT
+    assert "já constam no relato" in SYSTEM_PROMPT
+    assert "potência óptica" in SYSTEM_PROMPT
+    assert "cite e comente explicitamente o valor" in SYSTEM_PROMPT
 
 
 def test_user_prompt_includes_masked_report_and_category() -> None:

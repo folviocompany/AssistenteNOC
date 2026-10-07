@@ -200,12 +200,16 @@ class LLMService:
             max_retries=0,
         )
 
-    def _request_arguments(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+    def _request_arguments(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "model": self.settings.nvidia_model,
             "messages": messages,
             "temperature": self.settings.llm_temperature,
-            "max_tokens": self.settings.llm_max_tokens,
+            "max_tokens": max_tokens or self.settings.llm_max_tokens,
             "stream": False,
         }
         if self.settings.llm_reasoning_enabled is not None:
@@ -216,29 +220,37 @@ class LLMService:
             }
         return arguments
 
-    def _call_model(self, messages: list[dict[str, str]]) -> Any:
-        return self.client.chat.completions.create(**self._request_arguments(messages))
+    def _call_model(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int | None = None,
+    ) -> Any:
+        return self.client.chat.completions.create(
+            **self._request_arguments(messages, max_tokens)
+        )
 
     def analyze(
         self,
         masked_text: str,
         category_hint: str | None = None,
     ) -> LLMResult:
-        messages = [
+        original_messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": build_user_prompt(masked_text, category_hint),
             },
         ]
+        messages = [message.copy() for message in original_messages]
+        current_max_tokens = self.settings.llm_max_tokens
         usage: TokenUsage | None = None
-        validation_failures = 0
+        response_count = 0
         was_truncated = False
 
         for attempt_index in range(MAX_CALLS_PER_ANALYSIS):
             started_at = time.perf_counter()
             try:
-                response = self._call_model(messages)
+                response = self._call_model(messages, current_max_tokens)
             except (
                 APIConnectionError,
                 APITimeoutError,
@@ -259,6 +271,7 @@ class LLMService:
                 raise LLMUnavailableError() from exc
 
             elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+            response_count += 1
             response_usage = _read_usage(response)
             usage = _merge_usage(usage, response_usage)
             finish_reason = _read_finish_reason(response)
@@ -278,8 +291,16 @@ class LLMService:
                     "LLM response may be truncated model=%s attempt=%s max_tokens=%s",
                     self.settings.nvidia_model,
                     attempt_index + 1,
-                    self.settings.llm_max_tokens,
+                    current_max_tokens,
                 )
+                if attempt_index + 1 >= MAX_CALLS_PER_ANALYSIS:
+                    raise LLMResponseError(
+                        "A resposta da IA foi truncada mesmo após aumentar "
+                        "LLM_MAX_TOKENS."
+                    )
+                messages = [message.copy() for message in original_messages]
+                current_max_tokens = self.settings.llm_max_tokens * 2
+                continue
 
             raw_content = ""
             try:
@@ -287,35 +308,27 @@ class LLMService:
                 json_object = _extract_json_object(raw_content)
                 analysis = AIAnalysis.model_validate(json_object)
             except (ValidationError, ValueError) as exc:
-                validation_failures += 1
                 if attempt_index + 1 >= MAX_CALLS_PER_ANALYSIS:
-                    message = (
-                        "A resposta da IA foi truncada e não pôde ser validada. "
-                        "Aumente LLM_MAX_TOKENS ou tente novamente."
-                        if was_truncated
-                        else None
-                    )
-                    raise LLMResponseError(message) from exc
-                messages.extend(
-                    [
-                        {
-                            "role": "assistant",
-                            "content": _strip_thinking_blocks(raw_content),
-                        },
-                        {
-                            "role": "user",
-                            "content": build_correction_prompt(
-                                _validation_error_summary(exc)
-                            ),
-                        },
-                    ]
-                )
+                    raise LLMResponseError() from exc
+                messages = [
+                    *[message.copy() for message in original_messages],
+                    {
+                        "role": "assistant",
+                        "content": _strip_thinking_blocks(raw_content),
+                    },
+                    {
+                        "role": "user",
+                        "content": build_correction_prompt(
+                            _validation_error_summary(exc)
+                        ),
+                    },
+                ]
                 continue
 
             return LLMResult(
                 analysis=analysis,
                 model_used=self.settings.nvidia_model,
-                validated_on_first_response=validation_failures == 0,
+                validated_on_first_response=response_count == 1,
                 attempts=attempt_index + 1,
                 usage=usage,
                 truncated=was_truncated,
